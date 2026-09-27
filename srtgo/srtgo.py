@@ -30,19 +30,6 @@ from .ktx import (
     Disability4To6Passenger,
 )
 
-from .srt import (
-    SRT,
-    SRTError,
-    SRTNetFunnelError,
-    SeatType,
-    Adult,
-    Child,
-    Senior,
-    Disability1To3,
-    Disability4To6,
-)
-
-
 STATIONS = {
     "SRT": [
         "수서",
@@ -145,7 +132,7 @@ def srtgo(debug=False):
     ]
 
     RAIL_CHOICES = [
-        (colored("SRT", "red"), "SRT"),
+        (colored("SRT 노선 (코레일+ 예매)", "red"), "SRT"),
         (colored("KTX", "cyan"), "KTX"),
         ("취소", -1),
     ]
@@ -399,16 +386,17 @@ def set_login(rail_type="SRT", debug=False):
         "pass": keyring.get_password(rail_type, "pass") or "",
     }
 
+    account_name = "코레일+ 통합회원"
     login_info = inquirer.prompt(
         [
             inquirer.Text(
                 "id",
-                message=f"{rail_type} 계정 아이디 (멤버십 번호, 이메일, 전화번호)",
+                message=f"{account_name} 계정 아이디 (멤버십 번호, 이메일, 전화번호)",
                 default=credentials["id"],
             ),
             inquirer.Password(
                 "pass",
-                message=f"{rail_type} 계정 패스워드",
+                message=f"{account_name} 계정 비밀번호",
                 default=credentials["pass"],
             ),
         ]
@@ -417,17 +405,16 @@ def set_login(rail_type="SRT", debug=False):
         return False
 
     try:
-        SRT(
-            login_info["id"], login_info["pass"], verbose=debug
-        ) if rail_type == "SRT" else Korail(
-            login_info["id"], login_info["pass"], verbose=debug
-        )
+        rail = Korail(login_info["id"], login_info["pass"], verbose=debug)
+        if not rail.logined:
+            print("코레일 로그인에 실패했습니다. 통합회원 아이디와 비밀번호를 확인해 주세요.")
+            return False
 
         keyring.set_password(rail_type, "id", login_info["id"])
         keyring.set_password(rail_type, "pass", login_info["pass"])
         keyring.set_password(rail_type, "ok", "1")
         return True
-    except SRTError as err:
+    except KorailError as err:
         print(err)
         keyring.delete_password(rail_type, "ok")
         return False
@@ -438,17 +425,31 @@ def login(rail_type="SRT", debug=False):
         keyring.get_password(rail_type, "id") is None
         or keyring.get_password(rail_type, "pass") is None
     ):
-        set_login(rail_type)
+        if not set_login(rail_type, debug=debug):
+            return None
 
     user_id = keyring.get_password(rail_type, "id")
     password = keyring.get_password(rail_type, "pass")
 
-    rail = SRT if rail_type == "SRT" else Korail
-    return rail(user_id, password, verbose=debug)
+    rail = Korail(user_id, password, verbose=debug)
+    if rail.logined:
+        return rail
+
+    print("저장된 계정으로 로그인할 수 없습니다. 코레일+ 통합회원 정보를 다시 입력해 주세요.")
+    if not set_login(rail_type, debug=debug):
+        return None
+    rail = Korail(
+        keyring.get_password(rail_type, "id"),
+        keyring.get_password(rail_type, "pass"),
+        verbose=debug,
+    )
+    return rail if rail.logined else None
 
 
 def reserve(rail_type="SRT", debug=False):
     rail = login(rail_type, debug=debug)
+    if rail is None:
+        return
     is_srt = rail_type == "SRT"
 
     # Get date, time, stations, and passenger info
@@ -483,11 +484,8 @@ def reserve(rail_type="SRT", debug=False):
     stations, station_key = get_station(rail_type)
     options = get_options()
 
-    # Calculate dynamic booking window (SRT: D-30, KTX: D-31; both open at 07:00)
-    if is_srt:
-        max_days = 30 if now.hour >= 7 else 29
-    else:
-        max_days = 31 if now.hour >= 7 else 30
+    # Unified KTX/SRT bookings use the Korail booking window.
+    max_days = 31 if now.hour >= 7 else 30
 
     # Generate date choices within the window
     date_choices = [
@@ -541,11 +539,11 @@ def reserve(rail_type="SRT", debug=False):
     }
 
     passenger_classes = {
-        "adult": Adult if is_srt else AdultPassenger,
-        "child": Child if is_srt else ChildPassenger,
-        "senior": Senior if is_srt else SeniorPassenger,
-        "disability1to3": Disability1To3 if is_srt else Disability1To3Passenger,
-        "disability4to6": Disability4To6 if is_srt else Disability4To6Passenger,
+        "adult": AdultPassenger,
+        "child": ChildPassenger,
+        "senior": SeniorPassenger,
+        "disability1to3": Disability1To3Passenger,
+        "disability4to6": Disability4To6Passenger,
     }
 
     PASSENGER_TYPE = {
@@ -617,15 +615,18 @@ def reserve(rail_type="SRT", debug=False):
         "date": info["date"],
         "time": info["time"],
         "passengers": [passenger_classes["adult"](total_count)],
+        "include_no_seats": True,
         **(
-            {"available_only": False}
-            if is_srt
-            else {
-                "include_no_seats": True,
-                **({"train_type": TrainType.KTX} if "ktx" in options else {}),
-            }
+            {"train_type": TrainType.KTX}
+            if is_srt or "ktx" in options
+            else {}
         ),
     }
+
+    # The legacy SRT station spelling differs from Korail's station name.
+    if is_srt:
+        params["dep"] = "김천구미" if params["dep"] == "김천(구미)" else params["dep"]
+        params["arr"] = "김천구미" if params["arr"] == "김천(구미)" else params["arr"]
 
     trains = rail.search_train(**params)
 
@@ -659,7 +660,7 @@ def reserve(rail_type="SRT", debug=False):
     n_trains = len(choice["trains"])
 
     # Get seat type preference
-    seat_type = SeatType if is_srt else ReserveOption
+    seat_type = ReserveOption
     q_options = [
         inquirer.List(
             "type",
@@ -714,39 +715,8 @@ def reserve(rail_type="SRT", debug=False):
 
             trains = rail.search_train(**params)
             for i in choice["trains"]:
-                if _is_seat_available(trains[i], options["type"], rail_type):
+                if _is_seat_available(trains[i], options["type"]):
                     _reserve(trains[i])
-                    return
-            _sleep()
-
-        except SRTError as ex:
-            msg = ex.msg
-            if "정상적인 경로로 접근 부탁드립니다" in msg or isinstance(
-                ex, SRTNetFunnelError
-            ):
-                if debug:
-                    print(
-                        f"\nException: {ex}\nType: {type(ex)}\nArgs: {ex.args}\nMessage: {msg}"
-                    )
-                rail.clear()
-            elif "로그인 후 사용하십시오" in msg:
-                if debug:
-                    print(
-                        f"\nException: {ex}\nType: {type(ex)}\nArgs: {ex.args}\nMessage: {msg}"
-                    )
-                rail = login(rail_type, debug=debug)
-                if not rail.is_login and not _handle_error(ex):
-                    return
-            elif not any(
-                err in msg
-                for err in (
-                    "잔여석없음",
-                    "사용자가 많아 접속이 원활하지 않습니다",
-                    "예약대기 접수가 마감되었습니다",
-                    "예약대기자한도수초과",
-                )
-            ):
-                if not _handle_error(ex):
                     return
             _sleep()
 
@@ -761,7 +731,9 @@ def reserve(rail_type="SRT", debug=False):
                 rail.clear()
             elif "Need to Login" in msg:
                 rail = login(rail_type, debug=debug)
-                if not rail.is_login and not _handle_error(ex):
+                if rail is None:
+                    return
+                if not rail.logined and not _handle_error(ex):
                     return
             elif not any(
                 err in msg
@@ -786,11 +758,15 @@ def reserve(rail_type="SRT", debug=False):
                 )
             _sleep()
             rail = login(rail_type, debug=debug)
+            if rail is None:
+                return
 
         except ConnectionError as ex:
             if not _handle_error(ex, "연결이 끊겼습니다"):
                 return
             rail = login(rail_type, debug=debug)
+            if rail is None:
+                return
 
         except Exception as ex:
             if debug:
@@ -798,6 +774,8 @@ def reserve(rail_type="SRT", debug=False):
             if not _handle_error(ex):
                 return
             rail = login(rail_type, debug=debug)
+            if rail is None:
+                return
 
 
 def _sleep():
@@ -818,33 +796,24 @@ def _handle_error(ex, msg=None):
     return inquirer.confirm(message="계속할까요", default=True)
 
 
-def _is_seat_available(train, seat_type, rail_type):
-    if rail_type == "SRT":
-        if not train.seat_available():
-            return train.reserve_standby_available()
-        if seat_type in [SeatType.GENERAL_FIRST, SeatType.SPECIAL_FIRST]:
-            return train.seat_available()
-        if seat_type == SeatType.GENERAL_ONLY:
-            return train.general_seat_available()
-        return train.special_seat_available()
-    else:
-        if not train.has_seat():
-            return train.has_waiting_list()
-        if seat_type in [ReserveOption.GENERAL_FIRST, ReserveOption.SPECIAL_FIRST]:
-            return train.has_seat()
-        if seat_type == ReserveOption.GENERAL_ONLY:
-            return train.has_general_seat()
-        return train.has_special_seat()
+def _is_seat_available(train, seat_type):
+    if not train.has_seat():
+        return train.has_waiting_list()
+    if seat_type in [ReserveOption.GENERAL_FIRST, ReserveOption.SPECIAL_FIRST]:
+        return train.has_seat()
+    if seat_type == ReserveOption.GENERAL_ONLY:
+        return train.has_general_seat()
+    return train.has_special_seat()
 
 
 def check_reservation(rail_type="SRT", debug=False):
     rail = login(rail_type, debug=debug)
+    if rail is None:
+        return
 
     while True:
-        reservations = (
-            rail.get_reservations() if rail_type == "SRT" else rail.reservations()
-        )
-        tickets = [] if rail_type == "SRT" else rail.tickets()
+        reservations = rail.reservations()
+        tickets = rail.tickets()
 
         all_reservations = []
         for t in tickets:
@@ -878,7 +847,7 @@ def check_reservation(rail_type="SRT", debug=False):
                 out.append("[ 예매 내역 ]")
                 for reservation in all_reservations:
                     out.append(f"🚅{reservation}")
-                    if rail_type == "SRT":
+                    if hasattr(reservation, "tickets"):
                         out.extend(map(str, reservation.tickets))
 
             if out:
