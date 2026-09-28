@@ -12,7 +12,7 @@
 ## 설치
 
 ```bash
-pip install git+https://github.com/DionNam/srtgo_plus.git
+pip install git+https://github.com/junddao/srtgo_plus.git
 ```
 
 ## 사용법
