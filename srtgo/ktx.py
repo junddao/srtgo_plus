@@ -722,7 +722,17 @@ class Korail:
 
         r = self._session.post(url, data=data, headers=headers)
         self._log(r.text)
-        j = json.loads(r.text)
+        try:
+            j = json.loads(r.text)
+        except ValueError:
+            raise KorailError(f"로그인 응답을 해석할 수 없습니다 (HTTP {r.status_code})")
+
+        if "strResult" not in j:
+            # Blocked by the server (e.g. anti-macro policy) before reaching login logic
+            raise KorailError(
+                j.get("message") or f"로그인 요청이 거부되었습니다 (HTTP {r.status_code})",
+                j.get("code"),
+            )
 
         if j["strResult"] == "SUCC" and j.get("strMbCrdNo"):
             # self._key = j['Key']

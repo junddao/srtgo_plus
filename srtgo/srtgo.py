@@ -431,18 +431,26 @@ def login(rail_type="SRT", debug=False):
     user_id = keyring.get_password(rail_type, "id")
     password = keyring.get_password(rail_type, "pass")
 
-    rail = Korail(user_id, password, verbose=debug)
+    try:
+        rail = Korail(user_id, password, verbose=debug)
+    except KorailError as err:
+        print(err)
+        return None
     if rail.logined:
         return rail
 
     print("저장된 계정으로 로그인할 수 없습니다. 코레일+ 통합회원 정보를 다시 입력해 주세요.")
     if not set_login(rail_type, debug=debug):
         return None
-    rail = Korail(
-        keyring.get_password(rail_type, "id"),
-        keyring.get_password(rail_type, "pass"),
-        verbose=debug,
-    )
+    try:
+        rail = Korail(
+            keyring.get_password(rail_type, "id"),
+            keyring.get_password(rail_type, "pass"),
+            verbose=debug,
+        )
+    except KorailError as err:
+        print(err)
+        return None
     return rail if rail.logined else None
 
 
